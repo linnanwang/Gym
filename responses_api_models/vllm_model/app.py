@@ -562,7 +562,12 @@ class VLLMConverter(BaseModel):
             responses_create_params["max_tokens"] = max_output_tokens
 
         tools = responses_create_params.pop("tools", None)
-        if tools is not None:
+        # As of vLLM 0.24, Chat Completions rejects an empty `tools` array
+        # ("`tools` must not be an empty array. Either provide at least one tool
+        # or omit the field entirely."). Responses requests routinely carry
+        # `tools: []` (e.g. non-tool tasks), so treat an empty list as "no
+        # tools" and omit the field rather than forwarding `tools=[]`.
+        if tools:
             responses_create_params["tools"] = []
             for tool_dict in tools:
                 tool_dict = tool_dict.copy()

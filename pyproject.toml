@@ -296,7 +296,14 @@ version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
 
 [tool.distutils.egg_info]
-egg_base = "cache"
+# Upstream writes egg-info into cache/, but everything under cache/ is
+# gitignored ("*" with no usable negation) and cache/uv is ~8.6 GB. Ray's
+# working_dir packaging drops the directory entirely, so the editable build of
+# nemo-gym inside a Ray actor dies with
+#   error in 'egg_base' option: 'cache' does not exist or is not a directory
+# Writing egg-info to the project root (the setuptools default) survives the
+# copy and keeps the 8.6 GB cache out of every Ray package.
+egg_base = "."
 
 [project.urls]
 Download = "https://github.com/NVIDIA-NeMo/Gym/releases"
