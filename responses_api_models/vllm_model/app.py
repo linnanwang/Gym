@@ -71,6 +71,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
 
     uses_reasoning_parser: bool
+    # Opt-in JustGRPO-Fast entropy channel: request top_logprobs=1 and read the
+    # per-token entropy the diffusion fork packs into the extra (mask-token) slot.
+    return_entropy: bool = False
     replace_developer_role_with_system: bool = False
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
@@ -260,6 +263,15 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # prompt_logprobs=0,
             )
 
+        if self.config.return_entropy:
+            # JustGRPO-Fast: the diffusion fork (diffusion_config.return_entropy)
+            # packs per-token entropy into the extra logprob slot; top_logprobs=1
+            # The fork returns TWO entries per token: [sampled, mask_token(entropy)].
+            # top_logprobs=1 truncates to just the sampled token (see serving_chat
+            # _get_top_logprobs i<top_logprobs); request 2 so the mask-token entropy
+            # entry survives, then extract the token != chosen below.
+            body_dict["top_logprobs"] = 2
+
         if self.config.uses_reasoning_parser:
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") != "assistant" or "content" not in message_dict:
@@ -380,6 +392,23 @@ class VLLMModel(SimpleResponsesAPIModel):
             log_probs = choice_dict["logprobs"]["content"]
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 
+            # JustGRPO-Fast entropy: the fork emits per-token entropy as the extra
+            # (mask-token) top_logprobs entry -- the alternative whose token != the
+            # chosen token (mirrors vllm_worker_async.py). Absent -> 0.0.
+            generation_entropy = None
+            if self.config.return_entropy:
+                generation_entropy = [
+                    next(
+                        (
+                            alt["logprob"]
+                            for alt in (log_prob.get("top_logprobs") or [])
+                            if alt["token"] != log_prob["token"]
+                        ),
+                        0.0,
+                    )
+                    for log_prob in log_probs
+                ]
+
             """
             START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
             """
@@ -413,6 +442,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     # generation_token_ids=choice_dict["token_ids"],
                     generation_token_ids=generation_token_ids,
                     generation_log_probs=generation_log_probs,
+                    generation_entropy=generation_entropy,
                 )
             )
 
@@ -562,7 +592,11 @@ class VLLMConverter(BaseModel):
             responses_create_params["max_tokens"] = max_output_tokens
 
         tools = responses_create_params.pop("tools", None)
-        if tools is not None:
+        # Only forward tools when non-empty. vLLM rejects an empty `tools: []`
+        # array ("`tools` must not be an empty array. Either provide at least one
+        # tool or omit the field entirely."), which 500s tool-free agents such as
+        # instruction_following / calendar whose requests carry tools=[].
+        if tools:
             responses_create_params["tools"] = []
             for tool_dict in tools:
                 tool_dict = tool_dict.copy()
@@ -766,6 +800,10 @@ class VLLMConverter(BaseModel):
                 prompt_token_ids=message_dict["prompt_token_ids"],
                 generation_token_ids=message_dict["generation_token_ids"],
                 generation_log_probs=message_dict["generation_log_probs"],
+                # JustGRPO-Fast: thread per-token rollout entropy into the training
+                # output item (Optional; None on non-Fast rollouts). Without this the
+                # entropy is dropped here and require_generation_entropy() fail-fasts.
+                generation_entropy=message_dict.get("generation_entropy"),
             )
 
         return response_output

@@ -128,10 +128,27 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
             for output_function_call in all_fn_calls:
+                try:
+                    _tool_args = json.loads(output_function_call.arguments)
+                except (json.JSONDecodeError, ValueError) as _json_exc:
+                    # Model emitted a malformed / empty-argument tool call (e.g. the
+                    # step3p5 XML tool-parser left `.arguments` empty on not-well-formed
+                    # XML). Previously this raised JSONDecodeError -> HTTP 500 -> fatal in
+                    # validation (training silently drops it). Instead feed the parse error
+                    # back as the tool output and continue, so the rollout completes and
+                    # still gets scored -- mirrors the tool-server-error tolerance below.
+                    new_outputs.append(
+                        NeMoGymFunctionCallOutput(
+                            type="function_call_output",
+                            call_id=output_function_call.call_id,
+                            output=f"Error: tool-call arguments were not valid JSON: {output_function_call.arguments!r} ({_json_exc})",
+                        )
+                    )
+                    continue
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
-                    json=json.loads(output_function_call.arguments),
+                    json=_tool_args,
                     cookies=resources_server_cookies,
                 )
                 # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.

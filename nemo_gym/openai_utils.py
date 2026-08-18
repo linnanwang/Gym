@@ -101,6 +101,9 @@ class TokenIDLogProbMixin(BaseModel):
     prompt_token_ids: List[int]
     generation_token_ids: List[int]
     generation_log_probs: List[float]
+    # JustGRPO-Fast entropy channel: per-token generation entropy, aligned to
+    # generation_log_probs. Optional so non-Fast rollouts (no entropy) still validate.
+    generation_entropy: Optional[List[float]] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
