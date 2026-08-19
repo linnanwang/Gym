@@ -103,10 +103,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
     )
 
+    num_workers = get_nemo_gym_fastapi_num_workers()
     client_session = ClientSession(
         connector=TCPConnector(
-            limit=cfg.global_aiohttp_connector_limit,
-            limit_per_host=cfg.global_aiohttp_connector_limit_per_host,
+            limit=cfg.global_aiohttp_connector_limit // num_workers,
+            limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
@@ -411,6 +412,19 @@ def set_is_nemo_gym_fastapi_worker() -> None:
     environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
 
 
+# Backport of NVIDIA-NeMo/Gym#1054: with uvicorn workers>1 each worker builds its own
+# aiohttp connector pool, so divide the configured connection budget across workers.
+NEMO_GYM_FASTAPI_NUM_WORKERS = "NEMO_GYM_FASTAPI_NUM_WORKERS"
+
+
+def get_nemo_gym_fastapi_num_workers() -> int:
+    return int(getenv(NEMO_GYM_FASTAPI_NUM_WORKERS, "1"))
+
+
+def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:
+    environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -607,6 +621,7 @@ Full body: {json.dumps(exc.body, indent=4)}
 
         if server.config.num_workers and server.config.num_workers > 1:
             set_is_nemo_gym_fastapi_worker()
+            set_nemo_gym_fastapi_num_workers(server.config.num_workers)
 
             # TODO this is very dirty. We need a cleaner way to populate this information in the configs data structures.
             server_instance_config_dict = global_config_dict[server.config.name]
