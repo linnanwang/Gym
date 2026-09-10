@@ -127,16 +127,22 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             if not all_fn_calls and all_output_messages:
                 break
 
+            malformed_tool_call = False
             for output_function_call in all_fn_calls:
                 try:
                     _tool_args = json.loads(output_function_call.arguments)
                 except (json.JSONDecodeError, ValueError) as _json_exc:
-                    # Model emitted a malformed / empty-argument tool call (e.g. the
-                    # step3p5 XML tool-parser left `.arguments` empty on not-well-formed
-                    # XML). Previously this raised JSONDecodeError -> HTTP 500 -> fatal in
-                    # validation (training silently drops it). Instead feed the parse error
-                    # back as the tool output and continue, so the rollout completes and
-                    # still gets scored -- mirrors the tool-server-error tolerance below.
+                    # Malformed / empty tool-call arguments (e.g. step3p5 left
+                    # `.arguments` truncated when generation was cut mid-call). END THE
+                    # TRAJECTORY: the bad call is already in new_outputs and every later
+                    # turn re-POSTs the conversation, so taking another turn gives an
+                    # HTTP 500 from the model server, which kills the rollout and stalls
+                    # the ReplayBuffer forever. Repairing `.arguments` is not an option --
+                    # training uses the token ids recorded for this turn, so a repaired
+                    # re-render trips the non-contiguity check on the NeMo-RL side.
+                    # Other valid calls in this turn still run; the error output below
+                    # keeps the rollout scorable.
+                    malformed_tool_call = True
                     new_outputs.append(
                         NeMoGymFunctionCallOutput(
                             type="function_call_output",
@@ -160,6 +166,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     output=(await api_response.content.read()).decode(),
                 )
                 new_outputs.append(tool_response)
+
+            if malformed_tool_call:
+                break
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
