@@ -49,7 +49,16 @@ ns_tools_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
-      max_steps: 50
+      # Agent tool-loop cap (simple_agent's `while True`). Lowered 50 -> 20.
+      # Measured over 14 production steps (1792 trajectories): at 50 the run paced at
+      # ~17 min/step, and the turn distribution has a SPIKE of 61 trajectories sitting
+      # exactly at the cap -- the model does not reliably stop calling the tool.
+      #   cap 20 -> 74.4% of trajectories complete naturally, 25.6% truncated
+      #   cap 12 -> 59.7%                                     40.3%
+      #   cap  8 -> 47.5%                                     52.5%
+      # 20 trades ~26% truncation for roughly a third of the wall-clock. Truncated
+      # trajectories are still scored, so this is a real cost, not a free speedup.
+      max_steps: 20
       resources_server:
         type: resources_servers
         name: ns_tools
