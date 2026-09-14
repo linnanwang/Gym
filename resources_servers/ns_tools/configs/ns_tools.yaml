@@ -58,7 +58,7 @@ ns_tools_simple_agent:
       #   cap  8 -> 47.5%                                     52.5%
       # 20 trades ~26% truncation for roughly a third of the wall-clock. Truncated
       # trajectories are still scored, so this is a real cost, not a free speedup.
-      max_steps: 10
+      max_steps: 5
       resources_server:
         type: resources_servers
         name: ns_tools
