@@ -12,9 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import MonkeyPatch, raises
+from aiohttp import ServerTimeoutError
+from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
@@ -242,3 +244,28 @@ class TestServerUtils:
                 pass
 
         TestSimpleServer.run_webserver()
+
+
+@mark.asyncio
+@mark.parametrize("timeout_type", [asyncio.TimeoutError, ServerTimeoutError])
+@mark.parametrize("internal", [False, True])
+async def test_request_timeout_propagates_without_replaying_post(monkeypatch, timeout_type, internal):
+    timeout = timeout_type("request deadline exceeded")
+    # A second attempt would succeed, making an accidental retry fail promptly.
+    client = MagicMock(request=AsyncMock(side_effect=[timeout, MagicMock()]))
+    monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
+    with raises(timeout_type) as exc:
+        if internal:
+            server_client = ServerClient(
+                head_server_config=BaseServerConfig(host="localhost", port=1),
+                global_config_dict=DictConfig(
+                    {"tools": {"resources_servers": {"ns_tools": {"host": "localhost", "port": 2}}}}
+                ),
+            )
+            await server_client.post(server_name="tools", url_path="/execute", json={"code": "state += 1"})
+        else:
+            await nemo_gym.server_utils.request(
+                method="POST", url="http://localhost:2/execute", json={"code": "state += 1"}
+            )
+    assert exc.value is timeout
+    client.request.assert_awaited_once()

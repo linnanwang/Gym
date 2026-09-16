@@ -78,6 +78,7 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit_per_host: int = 1024
 
     global_aiohttp_client_request_debug: bool = False
+    global_aiohttp_client_timeout_s: Optional[float] = None
 
 
 def get_global_aiohttp_client(
@@ -109,7 +110,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
             limit=cfg.global_aiohttp_connector_limit // num_workers,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
         ),
-        timeout=ClientTimeout(),
+        timeout=ClientTimeout(total=cfg.global_aiohttp_client_timeout_s),
         cookie_jar=DummyCookieJar(),
     )
 
@@ -157,6 +158,10 @@ async def request(
     while True:
         try:
             return await client.request(method=method, url=url, **kwargs)
+        except asyncio.TimeoutError:
+            # The server may have executed a stateful request already. Preserve
+            # the deadline and let the caller handle failure without replaying it.
+            raise
         except ServerDisconnectedError:
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -579,6 +584,9 @@ repr(e): {repr(e)}"""
             return
 
         app = server.setup_webserver()
+        from nemo_gym.diagnostics import install_server_diagnostics
+
+        install_server_diagnostics(app, server.config.name)
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)

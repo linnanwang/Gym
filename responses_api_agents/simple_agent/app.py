@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
+import logging
 from typing import List
 
 from fastapi import Request, Response
@@ -46,6 +48,7 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
+    cleanup_session: bool = False
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -194,27 +197,42 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path="/v1/responses",
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        cookies = response.cookies
+        try:
+            response = await self.server_client.post(
+                server_name=self.config.name,
+                url_path="/v1/responses",
+                json=body.responses_create_params,
+                cookies=cookies,
+            )
+            await raise_for_status(response)
+            cookies = response.cookies
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(response)}
-        )
+            verify_request = SimpleAgentVerifyRequest.model_validate(
+                body.model_dump() | {"response": await get_response_json(response)}
+            )
 
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        return SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+            verify_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request.model_dump(),
+                cookies=cookies,
+            )
+            await raise_for_status(verify_response)
+            return SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        finally:
+            if self.config.cleanup_session:
+                try:
+                    async with asyncio.timeout(20):
+                        cleanup = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path="/cleanup_session",
+                            json={},
+                            cookies=cookies,
+                        )
+                        await raise_for_status(cleanup)
+                        await cleanup.read()
+                except Exception:
+                    logging.exception("Failed to delete rollout sandbox session")
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""

@@ -24,6 +24,7 @@ This resources server provides:
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -84,6 +85,7 @@ class NSToolsConfig(BaseResourcesServerConfig):
     # When True, skip replaying session history after sandbox worker restarts.
     # The model receives a warning in stderr instead of restored state.
     disable_session_restore: bool = False
+    cleanup_sessions: bool = False
 
 
 # ============================================================
@@ -142,6 +144,8 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             self._start_python_tool_server()
             self._initialize_nemo_skills_tools()
 
+            app.post("/cleanup_session")(self.cleanup_session)
+
             # Register a catch-all endpoint for tool execution
             # This handles any tool name dynamically
             app.post("/{tool_name}")(self.execute_tool)
@@ -156,7 +160,11 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         cmd = [
             sys.executable,
             "-m",
-            "nemo_skills.mcp.servers.python_tool",
+            (
+                "resources_servers.ns_tools.python_tool_server"
+                if os.environ.get("NRL_GYM_DIAGNOSTICS_DIR")
+                else "nemo_skills.mcp.servers.python_tool"
+            ),
             "--host",
             "127.0.0.1",
             "--port",
@@ -243,8 +251,20 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         overrides.setdefault("PythonTool", {})
         overrides["PythonTool"]["client_params"] = {"base_url": python_tool_url}
 
-        self.tool_manager = ToolManager(
-            module_specs=self.config.nemo_skills_tools,
+        manager_class = ToolManager
+        module_specs = self.config.nemo_skills_tools
+        if self.config.cleanup_sessions:
+            from resources_servers.ns_tools.managed_python_tool import ToolManager as SessionToolManager
+
+            manager_class = SessionToolManager
+            module_specs = [
+                "resources_servers.ns_tools.managed_python_tool.PythonTool"
+                if spec == "nemo_skills.mcp.servers.python_tool.PythonTool"
+                else spec
+                for spec in module_specs
+            ]
+        self.tool_manager = manager_class(
+            module_specs=module_specs,
             overrides=overrides,
             context=context,
         )
@@ -258,6 +278,14 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         asyncio.get_event_loop().run_until_complete(_load_tools())
         logger.info("NeMo Skills ToolManager initialized successfully")
+
+    async def cleanup_session(self, request: Request):
+        if self.config.cleanup_sessions:
+            session_id = request.session.get(SESSION_ID_KEY)
+            if session_id:
+                self._timing_by_session.pop(session_id, None)
+                await self.tool_manager.cleanup_session(session_id)
+        return {"ok": True}
 
     async def execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
         """
